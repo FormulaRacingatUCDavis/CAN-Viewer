@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-
 # based on alexandreblin's CAN monitor
 
 import argparse
@@ -7,8 +6,10 @@ import curses
 import sys
 import threading
 import traceback
+import time
 
 from handler import InvalidFrame, SerialHandler
+from datetime import datetime
 
 
 should_redraw = threading.Event()
@@ -18,9 +19,24 @@ can_messages = {}
 can_message_counts = {}
 can_messages_lock = threading.Lock()
 
-thread_exception = None
+frameIDArray = []
+dataArray = []
 
+thread_exception = None
 view_mode = 'static'
+# mode static or scroll 
+
+
+# for highlighting
+class Colors:
+    RED = '\033[91m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    BLUE = '\033[94m'
+    END = '\033[0m'
+def highlight_message(message, color):
+    highlighted_message = f"{color}{message}{Colors.END}"
+    print(highlighted_message)
 
 
 def reading_loop(source_handler, whitelist):
@@ -29,6 +45,8 @@ def reading_loop(source_handler, whitelist):
         while not stop_reading.is_set():
             try:
                 frame_id, data = source_handler.get_message()
+                frameIDArray.append(frame_id) ; dataArray.append(data)
+
             except InvalidFrame:
                 continue
             except EOFError:
@@ -98,81 +116,115 @@ def format_data_hex(data):
 #     return msg_str
 
 
-def main(stdscr, reading_thread):
+highlighted = []
+def scrollView(reading_thread):
+    currentIndex = 0
 
-    """Main function displaying the UI."""
-    # Don't print typed character
-    curses.noecho()
-    curses.cbreak()
-    curses.curs_set(0) # set cursor state to invisible
-
-    # Set getch() to non-blocking
-    stdscr.nodelay(True)
-
-    win = init_window(stdscr)
-
-    while True:
-        # should_redraw is set by the serial thread when new data is available
-        if should_redraw.wait(timeout=0.05):  # Timeout needed in order to react to user input
-            max_y, max_x = win.getmaxyx()
-
-            column_width = 50
-            id_column_start = 2
-            bytes_column_start = 13
-            text_column_start = 38
-
-            # Compute row/column counts according to the window size and borders
-            row_start = 4
-            lines_per_column = max_y - (1 + row_start)
-            num_columns = (max_x - 2) // column_width
-            
-
-            # Setting up column headers
-            for i in range(0, num_columns):
-                win.addstr(1, id_column_start + i * column_width, 'ID')
-                win.addstr(1, bytes_column_start + i * column_width, 'Bytes')
-                win.addstr(1, text_column_start + i * column_width, 'Count')
-
-            row = row_start  # The first column starts a bit lower to make space for the 'press q to quit message'
-            current_column = 0
-
-            # Make sure we don't read the can_messages dict while it's being written to in the reading thread
+    while view_mode == 'scroll':
+        if len(dataArray) > 0 and len(frameIDArray) > 0:
             with can_messages_lock:
-                for frame_id in sorted(can_messages.keys()):
-                    msg = can_messages[frame_id]
+                while (currentIndex < len(dataArray)):
+                    timestamp = datetime.now().isoformat(timespec='milliseconds')[14:]
+                    
+                    formattedMsg = f'{timestamp} 0x{frameIDArray[currentIndex]:0X}'.ljust(20) + format_data_hex(dataArray[currentIndex])
 
-                    msg_bytes = format_data_hex(msg)
+                    # the l just adjust the spacing between the id and bytes
+                    if f'0x{frameIDArray[currentIndex]:0x}' in highlighted:
+                        highlight_message(formattedMsg, Colors.BLUE)
+                    else:
+                        print(formattedMsg)
+                    currentIndex += 1
 
-                    # print ID in hex
-                    win.addstr(row, id_column_start + current_column * column_width, '0x%X'.ljust(5) % frame_id)
-                    # win.addstr(row, id_column_start + 5 + current_column * column_width, '%s' % str(frame_id).ljust(5)) 
 
-                    # print bytes
-                    win.addstr(row, bytes_column_start + current_column * column_width, msg_bytes.ljust(23))
+def main(stdscr, reading_thread):             
+    if view_mode == 'static':
+        global scrollOffset
+        scrollOffset = 0
+        """Main function displaying the UI."""
+        # Don't print typed character
+        curses.noecho()
+        curses.cbreak()
+        curses.curs_set(0) # set cursor state to invisible
 
-                    # print count
-                    win.addstr(row, text_column_start + current_column * column_width, (str)(can_message_counts[frame_id]).ljust(8))
+        # Set getch() to non-blocking
+        stdscr.nodelay(True)
 
-                    row = row + 1
+        win = init_window(stdscr)
 
-                    if row >= lines_per_column + row_start:
-                        # column full, switch to the next one
-                        row = row_start
-                        current_column = current_column + 1
+        while True:
+            # should_redraw is set by the serial thread when new data is available
+            if view_mode == 'static' and should_redraw.wait(timeout=0.05):  # Timeout needed in order to react to user input
+                max_y, max_x = win.getmaxyx()
 
-                        if current_column >= num_columns:
-                            break
+                column_width = 50
+                id_column_start = 2
+                bytes_column_start = 13
+                text_column_start = 38
 
-            win.refresh()
+                # Compute row/column counts according to the window size and borders
+                row_start = 4
+                lines_per_column = max_y - (1 + row_start)
+                num_columns = (max_x - 2) // column_width
+        
+                # Setting up column headers
+                for i in range(0, num_columns):
+                    win.addstr(1, id_column_start + i * column_width, 'ID')
+                    win.addstr(1, bytes_column_start + i * column_width, 'Bytes')
+                    win.addstr(1, text_column_start + i * column_width, 'Count')
 
-            should_redraw.clear()
+                row = row_start  # The first column starts a bit lower to make space for the 'press q to quit message'
+                current_column = 0
+            
+                c = stdscr.getch()
+                if c == ord('q') or not reading_thread.is_alive():
+                    break
+                # Control scrollOffset for static scrolling ; 'u' = up , 'd' = down 
+                elif c == ord('d'):
+                    scrollOffset = min(scrollOffset + 1, len(can_messages) - 1)
+                    should_redraw.set()
+                elif c == ord('u'):
+                    scrollOffset = max(scrollOffset + 1, 0)
+                    should_redraw.set()
+                elif c == curses.KEY_RESIZE:
+                    win = init_window(stdscr)
+                    should_redraw.set()
 
-        c = stdscr.getch()
-        if c == ord('q') or not reading_thread.is_alive():
-            break
-        elif c == curses.KEY_RESIZE:
-            win = init_window(stdscr)
-            should_redraw.set()
+                # Make sure we don't read the can_messages dict while it's being written to in the reading thread
+                with can_messages_lock:
+                    # for static scrolling
+                    frame_id = list(can_messages.keys())
+
+                    visible_id = frame_id[scrollOffset:scrollOffset + 10]
+                    # second index determines the amount of messages that are visible 
+                
+                    for message_id in visible_id:
+                        msg = can_messages[message_id]
+
+                        msg_bytes = format_data_hex(msg)
+
+                        # print ID in hex
+                        win.addstr(row, id_column_start + current_column * column_width, '0x%X'.ljust(5) % message_id)
+                        # win.addstr(row, id_column_start + 5 + current_column * column_width, '%s' % str(frame_id).ljust(5)) 
+
+                        # print bytes
+                        win.addstr(row, bytes_column_start + current_column * column_width, msg_bytes.ljust(23))
+
+                        # print count
+                        win.addstr(row, text_column_start + current_column * column_width, (str)(can_message_counts[message_id]).ljust(8))
+
+                        row = row + 1
+
+                        if row >= lines_per_column + row_start:
+                            # column full, switch to the next one
+                            row = row_start
+                            current_column = current_column + 1
+
+                            if current_column >= num_columns:
+                                break
+
+                win.refresh()
+
+                should_redraw.clear()
 
 
 def parse_ints(string_list):
@@ -193,6 +245,10 @@ def run():
     parser.add_argument('--whitelist', '-w', nargs='+', metavar='WHITELIST', help="IDs accepted")
     parser.add_argument('--whitelist-file','-wf',metavar='WHITELIST_FILE', help="File containing ids that are accepted")
     parser.add_argument('--view', '-v', metavar='VIEW', help="View mode - static or scroll")
+
+    # testing 
+    parser.add_argument('highlighted',metavar = 'H',type = str,help='Comma separated ID')
+
 
     args = parser.parse_args()
 
@@ -217,6 +273,11 @@ def run():
     if args.view:
         view_mode = args.view
 
+    if args.highlighted:
+        highlighted.append(args.highlighted.split(','))
+        # appended into the highlight array
+
+
     reading_thread = None
 
     try:
@@ -227,11 +288,16 @@ def run():
         reading_thread = threading.Thread(target=reading_loop, args=(source_handler, whitelist,))
         reading_thread.start()
 
-        # Make sure to draw the UI the first time even if no data has been read
+        # Make sure to draw the UI the first time even if no data has been read 
         should_redraw.set()
 
-        # Start the main loop
-        curses.wrapper(main, reading_thread)
+        # Start the loop
+
+        
+        scrollView(reading_thread=threading.Thread(target=reading_loop, args=(source_handler, whitelist,)))
+        
+        #curses.wrapper(main, reading_thread)
+        
     finally:
         # Cleanly stop reading thread before exiting
         if reading_thread:
