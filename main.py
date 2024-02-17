@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+# 12/3/2023: Scrolling view: anything new needs to populate the top of the list. push all the old stuff down. look at the redraw 
+
 # based on alexandreblin's CAN monitor
 
 import argparse
@@ -7,9 +10,8 @@ import sys
 import threading
 import traceback
 import time
-
-from handler import InvalidFrame, SerialHandler
 from datetime import datetime
+from handler import InvalidFrame, SerialHandler
 
 
 should_redraw = threading.Event()
@@ -22,9 +24,6 @@ can_messages_lock = threading.Lock()
 frameIDArray = []
 dataArray = []
 
-thread_exception = None
-view_mode = 'static'
-# mode static or scroll 
 
 
 # for highlighting
@@ -38,6 +37,10 @@ def highlight_message(message, color):
     highlighted_message = f"{color}{message}{Colors.END}"
     print(highlighted_message)
 
+thread_exception = None
+
+view_mode = 'scroll'
+# mode static or scroll 
 
 def reading_loop(source_handler, whitelist):
     """Background thread for reading."""
@@ -116,7 +119,7 @@ def format_data_hex(data):
 #     return msg_str
 
 
-highlighted = []
+highlighted = ['0x18']
 def scrollView(reading_thread):
     currentIndex = 0
 
@@ -136,8 +139,16 @@ def scrollView(reading_thread):
                     currentIndex += 1
 
 
-def main(stdscr, reading_thread):             
-    if view_mode == 'static':
+    currentIndex = 0
+    while view_mode == 'scroll':
+        if len(dataArray) > 0 and len(frameIDArray) > 0:
+            with can_messages_lock:
+                while (currentIndex < len(dataArray)):
+                    print(format_data_hex(dataArray[currentIndex]))
+                    currentIndex += 1
+                
+def main(stdscr, reading_thread):               
+    if view_mode != 'scroll':
         global scrollOffset
         scrollOffset = 0
         """Main function displaying the UI."""
@@ -180,7 +191,7 @@ def main(stdscr, reading_thread):
                     break
                 # Control scrollOffset for static scrolling ; 'u' = up , 'd' = down 
                 elif c == ord('d'):
-                    scrollOffset = min(scrollOffset + 1, len(can_messages) - 1)
+                    scrollOffset = min(scrollOffset + 1, len(can_messages) - 2)
                     should_redraw.set()
                 elif c == ord('u'):
                     scrollOffset = max(scrollOffset + 1, 0)
@@ -194,7 +205,7 @@ def main(stdscr, reading_thread):
                     # for static scrolling
                     frame_id = list(can_messages.keys())
 
-                    visible_id = frame_id[scrollOffset:scrollOffset + 10]
+                    visible_id = frame_id[scrollOffset:scrollOffset + 2]
                     # second index determines the amount of messages that are visible 
                 
                     for message_id in visible_id:
@@ -246,10 +257,6 @@ def run():
     parser.add_argument('--whitelist-file','-wf',metavar='WHITELIST_FILE', help="File containing ids that are accepted")
     parser.add_argument('--view', '-v', metavar='VIEW', help="View mode - static or scroll")
 
-    # testing 
-    parser.add_argument('highlighted',metavar = 'H',type = str,help='Comma separated ID')
-
-
     args = parser.parse_args()
 
     # checks arguments
@@ -273,11 +280,6 @@ def run():
     if args.view:
         view_mode = args.view
 
-    if args.highlighted:
-        highlighted.append(args.highlighted.split(','))
-        # appended into the highlight array
-
-
     reading_thread = None
 
     try:
@@ -288,16 +290,12 @@ def run():
         reading_thread = threading.Thread(target=reading_loop, args=(source_handler, whitelist,))
         reading_thread.start()
 
-        # Make sure to draw the UI the first time even if no data has been read 
-        should_redraw.set()
+        # Make sure to draw the UI the first time even if no data has been read (commented out to test scroll 1/13/2023)
+        #should_redraw.set()
 
-        # Start the loop
-
-        
+        # Start the main loop
         scrollView(reading_thread=threading.Thread(target=reading_loop, args=(source_handler, whitelist,)))
-        
         #curses.wrapper(main, reading_thread)
-        
     finally:
         # Cleanly stop reading thread before exiting
         if reading_thread:
