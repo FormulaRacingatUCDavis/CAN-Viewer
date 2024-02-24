@@ -23,6 +23,7 @@ can_messages_lock = threading.Lock()
 
 frameIDArray = []
 dataArray = []
+timeArray = []
 
 
 
@@ -48,7 +49,7 @@ def reading_loop(source_handler, whitelist):
         while not stop_reading.is_set():
             try:
                 frame_id, data = source_handler.get_message()
-                frameIDArray.append(frame_id) ; dataArray.append(data)
+                frameIDArray.append(frame_id) ; dataArray.append(data) ; timeArray.append(datetime.now().isoformat(timespec='milliseconds')[14:])
 
             except InvalidFrame:
                 continue
@@ -127,9 +128,7 @@ def scrollView(reading_thread):
         if len(dataArray) > 0 and len(frameIDArray) > 0:
             with can_messages_lock:
                 while (currentIndex < len(dataArray)):
-                    timestamp = datetime.now().isoformat(timespec='milliseconds')[14:]
-                    
-                    formattedMsg = f'{timestamp} 0x{frameIDArray[currentIndex]:0X}'.ljust(20) + format_data_hex(dataArray[currentIndex])
+                    formattedMsg = f'{timeArray[currentIndex]} 0x{frameIDArray[currentIndex]:0X}'.ljust(20) + format_data_hex(dataArray[currentIndex])
 
                     # the l just adjust the spacing between the id and bytes
                     if f'0x{frameIDArray[currentIndex]:0x}' in highlighted:
@@ -247,69 +246,89 @@ def parse_ints(string_list):
             continue
     return int_set
 
+def parse_strs(string_list):
+	# temporary string parsing. Probably needs to be improved or fixed in some way but idk.
+	str_set = set()
+	for line in string_list:
+		for string in line.strip().split():
+			str_set.add(string)
+	return str_set
+
 
 def run():
-    parser = argparse.ArgumentParser(description='Process CAN data from a serial device or from a file.')
-    parser.add_argument('serial_device', type=str, nargs='?')
-    parser.add_argument('baud_rate', type=int, default=115200, nargs='?',
-                        help='Serial baud rate in bps (default: 115200)')
-    parser.add_argument('--whitelist', '-w', nargs='+', metavar='WHITELIST', help="IDs accepted")
-    parser.add_argument('--whitelist-file','-wf',metavar='WHITELIST_FILE', help="File containing ids that are accepted")
-    parser.add_argument('--view', '-v', metavar='VIEW', help="View mode - static or scroll")
+	parser = argparse.ArgumentParser(description='Process CAN data from a serial device or from a file.')
+	parser.add_argument('serial_device', type=str, nargs='?')
+	parser.add_argument('baud_rate', type=int, default=115200, nargs='?',
+						help='Serial baud rate in bps (default: 115200)')
+	parser.add_argument('--whitelist', '-w', nargs='+', metavar='WHITELIST', help="IDs accepted")
+	parser.add_argument('--whitelist-file','-wf',metavar='WHITELIST_FILE', help="File containing ids that are accepted")
+	parser.add_argument('--view', '-v', metavar='VIEW', help="View mode - static or scroll")
+	# capital H in --Highlight and -H because -h conflicts
+	parser.add_argument('--Highlight', '-H', nargs='+', metavar='HIGHLIGHT', help="IDs to highlight")
+	parser.add_argument('--Highlight-file','-Hf',metavar='HIGHLIGHT_FILE', help="File containing ids to highlight")
+	args = parser.parse_args()
 
-    args = parser.parse_args()
+	# checks arguments
+	if args.serial_device:
+		source_handler = SerialHandler(args.serial_device, baudrate=args.baud_rate)
+	else:
+		print("Please specify serial device")
+		print()
+		parser.print_help()
+		return
 
-    # checks arguments
-    if args.serial_device:
-        source_handler = SerialHandler(args.serial_device, baudrate=args.baud_rate)
-    else:
-        print("Please specify serial device")
-        print()
-        parser.print_help()
-        return
+	# --whitelist-file prevails over --whitelist
+	if args.whitelist_file:
+		with open(args.whitelist_file) as f_obj:
+			whitelist = parse_ints(f_obj)
+	elif args.whitelist:
+		whitelist = parse_ints(args.whitelist)
+	else:
+		whitelist = set()
 
-    # --whitelist-file prevails over --whitelist
-    if args.whitelist_file:
-        with open(args.whitelist_file) as f_obj:
-            whitelist = parse_ints(f_obj)
-    elif args.whitelist:
-        whitelist = parse_ints(args.whitelist)
-    else:
-        whitelist = set()
+	if args.Highlight_file:
+		global highlighted
+		with open(args.Highlight_file) as f_obj:
+			highlighted = parse_strs(f_obj)
+	elif args.Highlight:
+		highlighted = args.Highlight
+	else:
+		highlighted = set()
 
-    if args.view:
-        view_mode = args.view
+	if args.view:
+		global view_mode
+		view_mode = str(args.view)
 
-    reading_thread = None
+	reading_thread = None
 
-    try:
-        # If reading from a serial device, it will be opened with timeout=0 (non-blocking read())
-        source_handler.open()
+	try:
+		# If reading from a serial device, it will be opened with timeout=0 (non-blocking read())
+		source_handler.open()
 
-        # Start the reading background thread
-        reading_thread = threading.Thread(target=reading_loop, args=(source_handler, whitelist,))
-        reading_thread.start()
+		# Start the reading background thread
+		reading_thread = threading.Thread(target=reading_loop, args=(source_handler, whitelist,))
+		reading_thread.start()
 
-        # Make sure to draw the UI the first time even if no data has been read (commented out to test scroll 1/13/2023)
-        #should_redraw.set()
+		# Make sure to draw the UI the first time even if no data has been read (commented out to test scroll 1/13/2023)
+		#should_redraw.set()
 
-        # Start the main loop
-        scrollView(reading_thread=threading.Thread(target=reading_loop, args=(source_handler, whitelist,)))
-        #curses.wrapper(main, reading_thread)
-    finally:
-        # Cleanly stop reading thread before exiting
-        if reading_thread:
-            stop_reading.set()
+		# Start the main loop
+		scrollView(reading_thread=threading.Thread(target=reading_loop, args=(source_handler, whitelist,)))
+		curses.wrapper(main, reading_thread)
+	finally:
+		# Cleanly stop reading thread before exiting
+		if reading_thread:
+			stop_reading.set()
 
-            if source_handler:
-                source_handler.close()
+			if source_handler:
+				source_handler.close()
 
-            reading_thread.join()
+			reading_thread.join()
 
-            # If the thread returned an exception, print it
-            if thread_exception:
-                traceback.print_exception(*thread_exception)
-                sys.stderr.flush()
+			# If the thread returned an exception, print it
+			if thread_exception:
+				traceback.print_exception(*thread_exception)
+				sys.stderr.flush()
 
 if __name__ == '__main__':
-    run()
+	run()
